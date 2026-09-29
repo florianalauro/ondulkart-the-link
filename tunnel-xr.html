@@ -141,8 +141,8 @@
     window.CFG = {
       // Tunnel / sciame
       tunnelLength: 28,        // m, il totem e' a meta' -> farfalle da x=+14 a x=-14
-      bandNear: 0.3,           // m dietro il pannello: bordo vicino dello sciame
-      bandFar: 6.5,            // m dietro il pannello: bordo lontano (tunnel largo 7.5)
+      bandNear: 1.5,           // m dietro il totem: il nastro inizia a ~1.5 m dal totem, le farfalle volano sopra
+      bandFar: 7.0,            // m dietro il totem: bordo lontano dello sciame
       yMin: 1.2,               // m dal pavimento
       yMax: 3.1,               // m dal pavimento (soffitto 3.3)
       count: +(Q.get('n') || 90),
@@ -171,7 +171,7 @@
       tunnelMidX: 0,
       colorBlend: 1.2,         // m prima/dopo la meta' in cui il colore sfuma (fucsia -> arancione)
       emissive: 0.6,           // autoilluminazione ali (come butterfly-experience)
-      envIntensity: +(Q.get('env') || 0.5),   // riflessi dell'ambiente (0 = nessuno)
+      envIntensity: +(Q.get('env') || 0.3),   // riflessi dell'ambiente (0 = nessuno)
 
       // Pannello / image target
       // Target = TUTTO il piano superiore del totem (28 x 28 cm: "Enjoy The Butterfly Experience" + QR),
@@ -202,8 +202,8 @@
 
       // Mano
       pollen: !Q.has('nopollen'),   // pulviscolo di polline nell'aria (punto 7)
-      pollenCount: +(Q.get('pollen') || 500),
-      pollenAlpha: 0.75,
+      pollenCount: +(Q.get('pollen') || 650),
+      pollenAlpha: 0.85,
       aids: true,                  // vibrazione all'aggancio + messaggi se il tracciamento si perde (punto 8)
       hands: !Q.has('nohands'),
       handFps: 12,
@@ -296,6 +296,21 @@
       vec3 tinted = min(brand * (hsv.z / uRefV), vec3(1.0));
       return mix(base, tinted, clamp(w, 0.0, 1.0));
     }`;
+
+  // Ali VERE = superficie opaca fatta di squame: niente riflessi lucidi. L'effetto "plastica"
+  // veniva da ruvidita' media (0.5-0.6), speculare pieno e sheen alto: il riflesso bianco
+  // scivolava sull'ala come su un giocattolo. Qui: ruvidita' alta (resta la variazione della
+  // mappa: nero piu' vellutato, puntini bianchi appena piu' lucidi), speculare ridotto,
+  // sheen leggero solo come "velluto" radente. Tarabile: ?matte=0 per il materiale originale.
+  function matteify(mat, key) {
+    if (Q.get('matte') === '0') return;
+    const wings = key === 'wings';
+    mat.roughness = wings ? 1.4 : 1.3;                 // x mappa ORM -> ~0.7-1.0
+    if ('specularIntensity' in mat) mat.specularIntensity = wings ? 0.3 : 0.4;
+    if (typeof mat.sheen === 'number') { mat.sheen = wings ? 0.12 : 0.35; mat.sheenRoughness = 0.8; }
+    if (mat.normalScale) mat.normalScale.setScalar(wings ? 0.7 : 1);
+    mat.needsUpdate = true;
+  }
 
   function patchMaterial(mat, vat, withTint, uniforms) {
     mat.onBeforeCompile = (shader) => {
@@ -437,6 +452,7 @@
       mat.side = THREE.DoubleSide;
       if (key === 'wings') mat.emissiveIntensity = CFG.emissive;
       mat.envMapIntensity = CFG.envIntensity;
+      matteify(mat, key);
       patchMaterial(mat, a.vat, key === 'wings', uniforms);
       a.geo.setAttribute('aPhase', phase);
       a.geo.setAttribute('aRate', rate);
@@ -539,7 +555,9 @@
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
     const mat = new THREE.ShaderMaterial({
-      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      // blending normale (non additivo): sopra al video di una fabbrica illuminata un additivo
+      // bianco su fondo chiaro non si vede. Cosi' il granello resta visibile su qualsiasi sfondo.
+      transparent: true, depthWrite: false, blending: THREE.NormalBlending,
       uniforms: { uTime: { value: 0 }, uPx: { value: 800 }, uCx: { value: 0 }, uFade: { value: 0 }, uAlpha: { value: CFG.pollenAlpha } },
       vertexShader: `
         attribute float aSeed; uniform float uTime; uniform float uPx; uniform float uCx;
@@ -555,7 +573,7 @@
           p.y = 0.15 + mod(p.y - 0.15, 3.1);
           vec4 mv = modelViewMatrix * vec4(p, 1.0);
           float dist = -mv.z;
-          gl_PointSize = clamp((0.009 + 0.012 * aSeed) * uPx / dist, 1.5, 22.0);
+          gl_PointSize = clamp((0.012 + 0.018 * aSeed) * uPx / dist, 2.5, 30.0);
           float tw = 0.5 + 0.5 * sin(uTime * (0.8 + aSeed * 1.6) + s);
           // niente particelle giganti attaccate all'obiettivo, e sfumate in lontananza
           vA = tw * smoothstep(0.25, 0.8, dist) * (1.0 - smoothstep(6.0, 9.0, dist));
@@ -566,9 +584,12 @@
         uniform float uFade; uniform float uAlpha; varying float vA;
         void main() {
           vec2 c = gl_PointCoord - 0.5; float d = dot(c, c);
-          float a = exp(-d * 11.0) * vA * uFade * uAlpha;
-          // blending additivo (SRC_ALPHA, ONE): il colore va passato NON premoltiplicato
-          gl_FragColor = vec4(1.0, 0.95, 0.82, a);              // bianco caldo, polline in controluce
+          if (d > 0.25) discard;
+          float core = exp(-d * 14.0);
+          float a = core * vA * uFade * uAlpha;
+          // granello bianco caldo con un bordo appena piu' scuro: leggibile anche su fondo chiaro
+          vec3 col = mix(vec3(0.55, 0.5, 0.42), vec3(1.0, 0.96, 0.86), smoothstep(0.0, 0.6, core));
+          gl_FragColor = vec4(col, a);
         }`,
     });
     const pts = new THREE.Points(geo, mat);
