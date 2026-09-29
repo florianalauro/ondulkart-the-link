@@ -1262,69 +1262,6 @@ AFRAME.registerComponent('bf-swarm', {
   }
 });
 
-// 6c. PULVISCOLO DI POLLINE (bf-pollen): granelli sospesi nell'aria attorno al visitatore.
-// Una sola draw call; il volume (12 x 3.1 x 12 m) segue la camera e i granelli si
-// riavvolgono ai bordi. Blending normale: visibile anche sopra un video luminoso.
-// Parametri live: window._pollenAlpha (0.85), window._pollenOff = true per spegnerlo.
-AFRAME.registerComponent('bf-pollen', {
-  schema: { count: { type: 'int', default: 650 } },
-  init: function () {
-    const N = this.data.count, pos = new Float32Array(N * 3), seed = new Float32Array(N);
-    for (let i = 0; i < N; i++) {
-      pos[i * 3] = (Math.random() * 2 - 1) * 6; pos[i * 3 + 1] = 0.15 + Math.random() * 3.1; pos[i * 3 + 2] = (Math.random() * 2 - 1) * 6;
-      seed[i] = Math.random();
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
-    this.mat = new THREE.ShaderMaterial({
-      transparent: true, depthWrite: false,
-      uniforms: { uTime: { value: 0 }, uPx: { value: 800 }, uC: { value: new THREE.Vector2() }, uFade: { value: 0 }, uAlpha: { value: 0.85 } },
-      vertexShader: [
-        'attribute float aSeed; uniform float uTime; uniform float uPx; uniform vec2 uC; varying float vA;',
-        'void main() {',
-        '  vec3 p = position; float s = aSeed * 97.0;',
-        '  p.x += sin(uTime * 0.13 + s) * 0.35 + uTime * 0.04 * (aSeed - 0.5);',
-        '  p.y += sin(uTime * 0.21 + s * 1.7) * 0.18 + uTime * 0.012;',
-        '  p.z += cos(uTime * 0.17 + s * 2.3) * 0.25;',
-        '  p.x = uC.x + mod(p.x - uC.x + 6.0, 12.0) - 6.0;',
-        '  p.z = uC.y + mod(p.z - uC.y + 6.0, 12.0) - 6.0;',
-        '  p.y = 0.15 + mod(p.y - 0.15, 3.1);',
-        '  vec4 mv = modelViewMatrix * vec4(p, 1.0); float dist = -mv.z;',
-        '  gl_PointSize = clamp((0.012 + 0.018 * aSeed) * uPx / max(dist, 0.01), 2.5, 30.0);',
-        '  float tw = 0.5 + 0.5 * sin(uTime * (0.8 + aSeed * 1.6) + s);',
-        '  vA = tw * smoothstep(0.25, 0.8, dist) * (1.0 - smoothstep(5.0, 6.0, dist));',
-        '  vA *= smoothstep(0.0, 0.3, p.y - 0.15) * (1.0 - smoothstep(2.9, 3.25, p.y));',
-        '  gl_Position = projectionMatrix * mv;',
-        '}'].join('\n'),
-      fragmentShader: [
-        'uniform float uFade; uniform float uAlpha; varying float vA;',
-        'void main() {',
-        '  vec2 c = gl_PointCoord - 0.5; float d = dot(c, c); if (d > 0.25) discard;',
-        '  float core = exp(-d * 14.0);',
-        '  vec3 col = mix(vec3(0.55, 0.5, 0.42), vec3(1.0, 0.96, 0.86), smoothstep(0.0, 0.6, core));',
-        '  gl_FragColor = vec4(col, core * vA * uFade * uAlpha);',
-        '}'].join('\n')
-    });
-    this.pts = new THREE.Points(geo, this.mat);
-    this.pts.frustumCulled = false; this.pts.renderOrder = 5;
-    this.el.sceneEl.object3D.add(this.pts);   // coordinate mondo, indipendenti dalla rotazione del belt
-    this.t = 0; this._v = new THREE.Vector3();
-  },
-  tick: function (time, dtMs) {
-    const dt = Math.min(0.1, (dtMs || 16) / 1000); this.t += dt;
-    const u = this.mat.uniforms, sc = this.el.sceneEl, cam = sc.camera;
-    this.pts.visible = !window._pollenOff;
-    u.uTime.value = this.t;
-    if (cam) {
-      cam.getWorldPosition(this._v); u.uC.value.set(this._v.x, this._v.z);
-      u.uPx.value = (sc.renderer ? sc.renderer.domElement.height : 800) * 0.5 * cam.projectionMatrix.elements[5];
-    }
-    u.uFade.value = Math.min(1, u.uFade.value + dt / 3);
-    u.uAlpha.value = window._pollenAlpha != null ? window._pollenAlpha : 0.85;
-  }
-});
-
 // Precarica e "cuoce" il modello appena la scena e' pronta: allo START lo sciame parte subito.
 if (!BF_LEGACY) {
   const _sc = document.querySelector('a-scene');
@@ -1336,7 +1273,6 @@ function createSwarm(swarmContainer) {
     const n = window._swarmFullCount != null ? window._swarmFullCount : 90;
     window._swarmFullCount = n;
     swarmContainer.setAttribute('bf-swarm', { count: n });
-    if (!/[?&]nopollen\b/.test(location.search)) swarmContainer.sceneEl.setAttribute('bf-pollen', '');
     return;
   }
   return createSwarmLegacy(swarmContainer);
