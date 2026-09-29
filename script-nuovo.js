@@ -1262,83 +1262,6 @@ AFRAME.registerComponent('bf-swarm', {
   }
 });
 
-// 6c. PULVISCOLO DI POLLINE (bf-pollen): SOLO dentro il tunnel, nella fascia in cui volano le
-// farfalle (non piu' attorno alla camera ovunque). Vive nel sistema dello sciame, quindi segue
-// l'orientamento del nastro, e scorre da destra a sinistra come trascinato dal loro volo, con
-// piccoli vortici. Una sola draw call.
-// Parametri live: window._pollenAlpha (0.85), window._pollenFlow (0.6 m/s), window._pollenOff.
-const BF_POLLEN_VS = [
-"attribute float aSeed;",
-"uniform float uTime; uniform float uPx; uniform float uHalf; uniform float uMid;",
-"uniform float uY0; uniform float uY1; uniform float uZ0; uniform float uZ1; uniform float uFlow;",
-"varying float vA;",
-"void main() {",
-"  float s = aSeed * 97.0;",
-"  // trascinato dal flusso delle farfalle: scorre verso -X (destra -> sinistra), piu' lento di loro",
-"  float v = uFlow * (0.55 + 0.9 * aSeed);",
-"  float x = position.x - uTime * v + sin(uTime * 0.5 + s) * 0.3;",
-"  x = mod(x + uHalf, 2.0 * uHalf) - uHalf;",
-"  // piccoli vortici: l'aria rimescolata dal battito delle ali",
-"  float yN = fract(position.y + sin(uTime * 0.35 + s + x * 0.45) * 0.05 + uTime * 0.004 * (aSeed - 0.3));",
-"  float zN = clamp(position.z + sin(uTime * 0.28 + s * 1.3 + x * 0.3) * 0.04, 0.0, 1.0);",
-"  vec3 p = vec3(uMid + x, mix(uY0, uY1, yN), -mix(uZ0, uZ1, zN));",
-"  vec4 mv = modelViewMatrix * vec4(p, 1.0);",
-"  float dist = -mv.z;",
-"  gl_PointSize = clamp((0.012 + 0.018 * aSeed) * uPx / max(dist, 0.01), 2.0, 26.0);",
-"  float tw = 0.5 + 0.5 * sin(uTime * (0.8 + aSeed * 1.6) + s);",
-"  vA = tw * smoothstep(0.3, 0.9, dist) * (1.0 - smoothstep(7.0, 10.0, dist));",
-"  vA *= 1.0 - smoothstep(uHalf - 1.5, uHalf, abs(x));                // sfuma alle estremita' del tunnel",
-"  vA *= smoothstep(0.0, 0.08, yN) * (1.0 - smoothstep(0.9, 1.0, yN)); // e ai bordi della fascia",
-"  gl_Position = projectionMatrix * mv;",
-"}"
-].join('\n');
-const BF_POLLEN_FS = [
-"uniform float uFade; uniform float uAlpha; varying float vA;",
-"void main() {",
-"  vec2 c = gl_PointCoord - 0.5; float d = dot(c, c); if (d > 0.25) discard;",
-"  float core = exp(-d * 14.0);",
-"  vec3 col = mix(vec3(0.55, 0.5, 0.42), vec3(1.0, 0.96, 0.86), smoothstep(0.0, 0.6, core));",
-"  gl_FragColor = vec4(col, core * vA * uFade * uAlpha);",
-"}"
-].join('\n');
-AFRAME.registerComponent('bf-pollen', {
-  schema: { count: { type: 'int', default: 1400 } },
-  init: function () {
-    const N = this.data.count, half = 14, pos = new Float32Array(N * 3), seed = new Float32Array(N);
-    for (let i = 0; i < N; i++) {
-      pos[i * 3] = (Math.random() * 2 - 1) * half; pos[i * 3 + 1] = Math.random(); pos[i * 3 + 2] = Math.random();
-      seed[i] = Math.random();
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
-    const near = window._bandNear != null ? window._bandNear : 2.0, far = window._bandFar != null ? window._bandFar : 8.5;
-    this.mat = new THREE.ShaderMaterial({
-      transparent: true, depthWrite: false,
-      uniforms: {
-        uTime: { value: 0 }, uPx: { value: 800 }, uHalf: { value: half }, uMid: { value: 0 },
-        uY0: { value: 1.2 }, uY1: { value: 5.0 }, uZ0: { value: near - 0.3 }, uZ1: { value: far + 0.3 },
-        uFlow: { value: 0.6 }, uFade: { value: 0 }, uAlpha: { value: 0.85 }
-      },
-      vertexShader: BF_POLLEN_VS, fragmentShader: BF_POLLEN_FS
-    });
-    this.pts = new THREE.Points(geo, this.mat);
-    this.pts.frustumCulled = false; this.pts.renderOrder = 5;
-    this.el.object3D.add(this.pts);   // dentro #swarm: stesse coordinate del tunnel
-    this.t = 0;
-  },
-  tick: function (time, dtMs) {
-    const dt = Math.min(0.1, (dtMs || 16) / 1000); this.t += dt;
-    const u = this.mat.uniforms, sc = this.el.sceneEl, cam = sc.camera;
-    this.pts.visible = !window._pollenOff;
-    u.uTime.value = this.t;
-    if (cam) u.uPx.value = (sc.renderer ? sc.renderer.domElement.height : 800) * 0.5 * cam.projectionMatrix.elements[5];
-    u.uFade.value = Math.min(1, u.uFade.value + dt / 3);
-    u.uAlpha.value = window._pollenAlpha != null ? window._pollenAlpha : 0.85;
-    u.uFlow.value = window._pollenFlow != null ? window._pollenFlow : 0.6;
-  }
-});
-
 // Precarica e "cuoce" il modello appena la scena e' pronta: allo START lo sciame parte subito.
 if (!BF_LEGACY) {
   const _sc = document.querySelector('a-scene');
@@ -1350,7 +1273,6 @@ function createSwarm(swarmContainer) {
     const n = window._swarmFullCount != null ? window._swarmFullCount : 90;
     window._swarmFullCount = n;
     swarmContainer.setAttribute('bf-swarm', { count: n });
-    if (!/[?&]nopollen\b/.test(location.search)) swarmContainer.setAttribute('bf-pollen', '');
     return;
   }
   return createSwarmLegacy(swarmContainer);
