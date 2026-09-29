@@ -146,7 +146,11 @@
       count: +(Q.get('n') || 90),
       speedMin: 28 / 14,       // m/s (come prima: 10-14 s per 28 m)
       speedMax: 28 / 10,
-      size: 0.2,               // scala del modello (come A-Frame: 0.2 0.15 0.2)
+      // Scala del modello. Il GLB e' largo 2.48 unita': in A-Frame 0.2 non si notava (unita'
+      // non metriche + FOV 80°), ma qui la scena e' in METRI reali e usa il FOV vero della
+      // fotocamera (piu' stretto): 0.2 = farfalle da 50 cm, viste ~1.7x piu' grandi di
+      // butterfly-experience. 0.115 riproduce la stessa grandezza a schermo. Prova dal vivo: ?size=0.1
+      size: +(Q.get('size') || 0.115),
       sizeJitter: 0.25,        // +-25% di variazione
       flapSpeed: 1.0,          // velocita' battito rispetto al clip originale
       bob: 0.08,               // m, oscillazione verticale
@@ -730,7 +734,6 @@
         XR8.Threejs.pipelineModule(),             // three.js nello stesso contesto e frame
         XR8.XrController.pipelineModule(),        // SLAM + image target
       ];
-      if (CFG.hands) mods.push(XR8.CameraPixelArray.pipelineModule({ luminance: false, maxDimension: 256 }));
       if (window.XRExtras) mods.unshift(XRExtras.AlmostThere.pipelineModule(), XRExtras.Loading.pipelineModule(), XRExtras.RuntimeError.pipelineModule());
       mods.push({
         name: 'the-link',
@@ -745,9 +748,13 @@
         onUpdate: ({ processCpuResult }) => {
           const dt = Math.min(clock.getDelta(), 0.1);
           if (swarm && tunnel.visible) swarm.update(dt);
-          if (CFG.hands) feedHands(processCpuResult);
           if (CFG.debug) updateHud();
         },
+        // La mano legge il frame SUBITO dopo il render di three (stesso task, prima che il
+        // browser presenti il frame): cosi' il canvas WebGL e' ancora leggibile e le coordinate
+        // coincidono esattamente con lo schermo. (Il pixel array di 8th Wall usato prima e'
+        // nell'orientamento del sensore e non allineato al display: la mano non veniva trovata.)
+        onRender: () => { if (CFG.hands) feedHands(); },
         onCanvasSizeChange: fitCanvas,
         listeners: [
           { event: 'reality.imagefound', process: ({ detail }) => onTargetPose(detail) },
@@ -789,25 +796,26 @@
     handCanvas = document.createElement('canvas'); handCtx = handCanvas.getContext('2d');
     hands = new window.Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
     hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5 });
-    hands.onResults(onHandResults);
+    hands.onResults((r) => { handDiag.results++; onHandResults(r); });
   }
 
-  function feedHands(cpu) {
+  const handDiag = { sends: 0, results: 0, err: '' };
+  function feedHands() {
     if (!hands || handBusy) return;
     const now = performance.now();
     if (now - lastHandT < 1000 / CFG.handFps) return;
-    const pa = cpu && cpu.camerapixelarray;
-    if (!pa || !pa.pixels) return;
     lastHandT = now;
-    const w = pa.cols, h = pa.rows;
-    if (handCanvas.width !== w || handCanvas.height !== h) { handCanvas.width = w; handCanvas.height = h; handImg = handCtx.createImageData(w, h); }
-    // copia riga per riga (rowBytes puo' avere padding)
-    const src = pa.pixels, dst = handImg.data, rb = pa.rowBytes || w * 4;
-    for (let y = 0; y < h; y++) dst.set(src.subarray(y * rb, y * rb + w * 4), y * w * 4);
-    handCtx.putImageData(handImg, 0, 0);
-    handBusy = true;
-    hands.send({ image: handCanvas }).catch(() => {}).finally(() => { handBusy = false; });
+    // copia ridotta del canvas (lato corto 320 px): abbastanza per MediaPipe, leggera da copiare
+    const sc = 320 / Math.min(canvas.width, canvas.height);
+    const w = Math.round(canvas.width * sc), h = Math.round(canvas.height * sc);
+    if (handCanvas.width !== w || handCanvas.height !== h) { handCanvas.width = w; handCanvas.height = h; }
+    try { handCtx.drawImage(canvas, 0, 0, w, h); } catch (e) { handDiag.err = 'draw ' + e.name; return; }
+    handBusy = true; handDiag.sends++;
+    hands.send({ image: handCanvas })
+      .catch((e) => { handDiag.err = 'send ' + (e && e.message || e); })
+      .finally(() => { handBusy = false; });
   }
+
 
   function onHandResults(res) {
     const now = performance.now();
@@ -869,6 +877,7 @@
       `ancora ${anchor.ready ? (anchor.fromTarget ? 'PANNELLO' : 'FALLBACK') : '-'} | pannello visto ${seen}\n` +
       `scala ${anchor.upm.toFixed(3)} u/m (${anchor.upmSamples} campioni) | yaw ${(anchor.yaw * 180 / Math.PI).toFixed(1)}°\n` +
       `ultima corr. ${anchor.lastDelta.toFixed(2)} m / ${anchor.lastDYaw.toFixed(1)}° | tot ${anchor.corrections}\n` +
+      `mano: invii ${handDiag.sends} risultati ${handDiag.results} ${handDiag.err} ${CFG.hands ? '' : '(OFF)'}\n` +
       `farfalle ${swarm ? CFG.count : 0} | mani ${window._handsN || 0} | visitatore x ${(window._visitorX || 0).toFixed(1)} m (finestra ${(window._winC || 0).toFixed(1)})\n` +
       `target json ${tgtDiag.json} | load ${tgtDiag.loading} scan ${tgtDiag.scanning}\n` +
       `found ${tgtDiag.found} upd ${tgtDiag.updated} | ny ${(tgtDiag.ny || 0).toFixed(2)} | solo-pos ${tgtDiag.posOnly || 0}\n` +
