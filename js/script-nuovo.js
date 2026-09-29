@@ -297,6 +297,8 @@ function applySwarmReduction(reduced) {
   const full = window._swarmFullCount != null ? window._swarmFullCount : 90;
   const hand = window._swarmHandCount != null ? window._swarmHandCount : 60;
   const showCount = reduced ? hand : full;
+  // sciame in instancing: basta ridurre il numero di istanze disegnate
+  if (window._bfSwarm) { window._bfSwarm.setVisibleCount(showCount); return; }
   for (let i = 0; i < _butterflies.length; i++) {
     const el = _butterflies[i];
     if (!el || !el.object3D) continue;
@@ -697,7 +699,10 @@ function startQrLoop() {
 
 function qrTick(ts) {
   if (!_qrLoopOn) return;
-  if (ts - _qrLastRun >= 180) { _qrLastRun = ts; scanQr(); } // ~5.5 volte/sec (jsQR e' pesante)
+  // ~5.5 volte/sec finche' si cerca il totem; dopo l'avvio ~1.5/sec (basta per riallineare,
+  // e jsQR sul main thread costa: era una delle cause degli scatti)
+  const qrInt = experienceActivated ? (window._qrIntervalActive || 650) : 180;
+  if (ts - _qrLastRun >= qrInt) { _qrLastRun = ts; scanQr(); }
   requestAnimationFrame(qrTick);
 }
 
@@ -976,7 +981,237 @@ window.addEventListener('load', () => {
 });
 
 // 6. Sciame di farfalle
+// 6b. SCIAME IN INSTANCING (bf-swarm) — sostituisce le 90 entita' A-Frame separate.
+// Prima: 90 entita' con gltf-model -> il GLB veniva scaricato/decodificato 90 volte (caricamento
+// lento), 90 scheletri da aggiornare e ~270 draw call a ogni frame (scatti, soprattutto su
+// Android). Ora il GLB si carica UNA volta, l'animazione "Flying" viene campionata in una
+// texture (VAT) e tutte le farfalle sono 2 InstancedMesh: 2 draw call, zero skinning.
+// Volo, dimensione, battito sfasato e colore fucsia -> arancione restano quelli di prima.
+// Parametri live: window._bfSize (1.15), _bfBob, _bfWobble, _colorFrom/_colorTo, _bfEmissive.
+// ?legacy nell'URL = vecchio sciame a entita' (per confronto).
+const BF_LEGACY = /[?&]legacy\b/.test(location.search);
+let _bfAssetsP = null;
+window._bfSwarm = null;
+
+function bfLoadAssets() {
+  if (_bfAssetsP) return _bfAssetsP;
+  const url = document.getElementById('butterflyModel').getAttribute('src');
+  _bfAssetsP = new Promise((resolve, reject) => {
+    new THREE.GLTFLoader().load(url, (g) => { try { resolve(bfBake(g)); } catch (e) { reject(e); } }, undefined, reject);
+  });
+  return _bfAssetsP;
+}
+
+function bfBake(gltf) {
+  const root = gltf.scene;
+  root.updateMatrixWorld(true);
+  const clip = THREE.AnimationClip.findByName(gltf.animations, 'Flying') || gltf.animations[0];
+  const mixer = new THREE.AnimationMixer(root);
+  mixer.clipAction(clip).play();
+  const groups = {};
+  root.traverse((o) => { if (o.isSkinnedMesh) (groups[o.material.map ? 'wings' : 'body'] = groups[o.material.map ? 'wings' : 'body'] || []).push(o); });
+  const FR = 20, v = new THREE.Vector3(), out = { fps: FR / clip.duration };
+  for (const key of Object.keys(groups)) {
+    const meshes = groups[key];
+    let n = 0; meshes.forEach((m) => { n += m.geometry.attributes.position.count; });
+    const uv = new Float32Array(n * 2), vid = new Float32Array(n), idx = [];
+    let off = 0;
+    for (const m of meshes) {
+      const g = m.geometry, c = g.attributes.position.count;
+      if (g.attributes.uv) uv.set(g.attributes.uv.array.subarray(0, c * 2), off * 2);
+      const gi = g.index ? g.index.array : Array.from({ length: c }, (_, i) => i);
+      for (let i = 0; i < gi.length; i++) idx.push(gi[i] + off);
+      for (let i = 0; i < c; i++) vid[off + i] = off + i;
+      off += c;
+    }
+    const W = n, H = FR * 2, data = new Float32Array(W * H * 4);
+    const tmp = new THREE.BufferGeometry(), tp = new THREE.BufferAttribute(new Float32Array(n * 3), 3);
+    tmp.setAttribute('position', tp); tmp.setIndex(idx);
+    for (let f = 0; f < FR; f++) {
+      mixer.setTime((f / FR) * clip.duration);
+      root.updateMatrixWorld(true);
+      let o = 0;
+      for (const m of meshes) {
+        const c = m.geometry.attributes.position.count;
+        const pa = m.geometry.attributes.position;
+        // three r137 (A-Frame 1.3): boneTransform parte dal valore GIA' presente in v
+        for (let i = 0; i < c; i++) { v.fromBufferAttribute(pa, i); m.boneTransform(i, v); v.applyMatrix4(m.matrixWorld); tp.setXYZ(o + i, v.x, v.y, v.z); }
+        o += c;
+      }
+      tmp.computeVertexNormals();
+      const nr = tmp.attributes.normal;
+      for (let i = 0; i < n; i++) {
+        const p = (f * W + i) * 4, q = ((f + FR) * W + i) * 4;
+        data[p] = tp.getX(i); data[p + 1] = tp.getY(i); data[p + 2] = tp.getZ(i); data[p + 3] = 1;
+        data[q] = nr.getX(i); data[q + 1] = nr.getY(i); data[q + 2] = nr.getZ(i);
+      }
+    }
+    const tex = new THREE.DataTexture(data, W, H, THREE.RGBAFormat, THREE.FloatType);
+    tex.minFilter = tex.magFilter = THREE.NearestFilter; tex.generateMipmaps = false; tex.needsUpdate = true;
+    const geo = new THREE.BufferGeometry();
+    const p0 = new Float32Array(n * 3); for (let i = 0; i < n; i++) { p0[i * 3] = data[i * 4]; p0[i * 3 + 1] = data[i * 4 + 1]; p0[i * 3 + 2] = data[i * 4 + 2]; }
+    geo.setAttribute('position', new THREE.BufferAttribute(p0, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+    geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+    geo.setAttribute('aVid', new THREE.BufferAttribute(vid, 1));
+    geo.setIndex(idx);
+    out[key] = { geo, vat: { tex, W, H, FR }, material: meshes[0].material };
+    tmp.dispose();
+  }
+  return out;
+}
+
+const BF_VAT_TINT = [
+  'uniform vec3 uColA; uniform vec3 uColB; uniform float uRefV; uniform vec2 uTintHue; uniform float uTintSatMin;',
+  'varying float vBfTint;',
+  'vec3 bfRgb2Hsv(vec3 c) {',
+  '  vec4 K = vec4(0.0, -1.0 / 3.0, 2.0 / 3.0, -1.0);',
+  '  vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));',
+  '  vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));',
+  '  float d = q.x - min(q.w, q.y);',
+  '  return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + 1.0e-10)), d / (q.x + 1.0e-10), q.x);',
+  '}',
+  'vec3 bfTint(vec3 base) {',
+  '  vec3 hsv = bfRgb2Hsv(base); float deg = hsv.x * 360.0;',
+  '  float w = smoothstep(uTintHue.x - 5.0, uTintHue.x + 5.0, deg);',
+  '  w *= 1.0 - smoothstep(uTintHue.y - 8.0, uTintHue.y + 8.0, deg);',
+  '  w *= smoothstep(uTintSatMin, uTintSatMin + 0.15, hsv.y);',
+  '  vec3 brand = mix(uColA, uColB, vBfTint);',
+  '  vec3 tinted = min(brand * (hsv.z / uRefV), vec3(1.0));',
+  '  return mix(base, tinted, clamp(w, 0.0, 1.0));',
+  '}'
+].join('\n');
+
+function bfPatchMaterial(mat, vat, withTint, U) {
+  mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, U, { uVat: { value: vat.tex }, uVatSize: { value: new THREE.Vector2(vat.W, vat.H) }, uFrames: { value: vat.FR } });
+    sh.vertexShader = [
+      'attribute float aVid; attribute float aPhase; attribute float aRate; attribute float aTint;',
+      'uniform sampler2D uVat; uniform vec2 uVatSize; uniform float uFrames; uniform float uTime; uniform float uFps;',
+      'varying float vBfTint;',
+      'vec3 bfFetch(float row) { return texture2D(uVat, vec2((aVid + 0.5) / uVatSize.x, (row + 0.5) / uVatSize.y)).xyz; }'
+    ].join('\n') + '\n' + sh.vertexShader
+      .replace('#include <beginnormal_vertex>', [
+        'float bfT = (uTime * aRate + aPhase) * uFps;',
+        'float bfF0 = mod(floor(bfT), uFrames); float bfF1 = mod(bfF0 + 1.0, uFrames); float bfA = fract(bfT);',
+        'vec3 objectNormal = normalize(mix(bfFetch(bfF0 + uFrames), bfFetch(bfF1 + uFrames), bfA));',
+        '#ifdef USE_TANGENT', 'vec3 objectTangent = vec3(tangent.xyz);', '#endif'].join('\n'))
+      .replace('#include <begin_vertex>', 'vec3 transformed = mix(bfFetch(bfF0), bfFetch(bfF1), bfA);\nvBfTint = aTint;');
+    if (withTint) {
+      sh.fragmentShader = BF_VAT_TINT + '\n' + sh.fragmentShader
+        .replace('#include <map_fragment>', '#include <map_fragment>\ndiffuseColor.rgb = bfTint(diffuseColor.rgb);')
+        .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance = bfTint(totalEmissiveRadiance);');
+    }
+  };
+  mat.customProgramCacheKey = () => 'bfVat' + (withTint ? 'T' : '');
+}
+
+AFRAME.registerComponent('bf-swarm', {
+  schema: { count: { type: 'int', default: 90 } },
+  init: function () {
+    this.ready = false;
+    bfLoadAssets().then((A) => this.build(A)).catch((e) => console.error('[bf-swarm] modello', e));
+  },
+  build: function (A) {
+    const N = this.data.count, renderer = this.el.sceneEl.renderer;
+    const U = {
+      uTime: { value: 0 }, uFps: { value: A.fps },
+      uColA: { value: new THREE.Color('#ce0058').convertSRGBToLinear() },
+      uColB: { value: new THREE.Color('#fe5000').convertSRGBToLinear() },
+      uRefV: { value: 0.8 }, uTintHue: { value: new THREE.Vector2(0, 50) }, uTintSatMin: { value: 0.25 }
+    };
+    const phase = new THREE.InstancedBufferAttribute(new Float32Array(N), 1);
+    const rate = new THREE.InstancedBufferAttribute(new Float32Array(N), 1);
+    const tint = new THREE.InstancedBufferAttribute(new Float32Array(N), 1);
+    tint.setUsage(THREE.DynamicDrawUsage);
+    for (let i = 0; i < N; i++) { phase.array[i] = Math.random() * 10; rate.array[i] = 0.82 + Math.random() * 0.36; }
+    this.meshes = [];
+    const aniso = Math.min(4, renderer.capabilities.getMaxAnisotropy());
+    for (const key of ['body', 'wings']) {
+      const a = A[key]; if (!a) continue;
+      const mat = a.material.clone();
+      mat.side = THREE.DoubleSide;
+      if (key === 'wings') {
+        mat.emissiveIntensity = window._bfEmissive != null ? window._bfEmissive : 0.6;
+        ['map', 'emissiveMap', 'normalMap', 'roughnessMap'].forEach((s) => { if (mat[s]) mat[s].anisotropy = aniso; });
+      }
+      bfPatchMaterial(mat, a.vat, key === 'wings', U);
+      const geo = a.geo.clone();
+      geo.setAttribute('aPhase', phase); geo.setAttribute('aRate', rate); geo.setAttribute('aTint', tint);
+      const im = new THREE.InstancedMesh(geo, mat, N);
+      im.frustumCulled = false;
+      im.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      this.el.object3D.add(im);
+      this.meshes.push(im);
+    }
+    for (let i = 1; i < this.meshes.length; i++) this.meshes[i].instanceMatrix = this.meshes[0].instanceMatrix;
+    this.U = U; this.tint = tint;
+
+    // corsie: stessa griglia di prima (12 righe x 13 colonne nella fascia del tunnel)
+    const L = 28, rows = 12, cols = 13, grid = [];
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) grid.push({ y: (r / (rows - 1)) * 3.3 + 1.5, z: -((c / (cols - 1)) * 7.5 + 1) });
+    grid.sort(() => Math.random() - 0.5);
+    this.half = L / 2;
+    this.b = [];
+    for (let i = 0; i < N; i++) { const o = { slot: grid[i % grid.length] }; this.newLane(o, true); this.b.push(o); }
+    this.t = 0; this.visibleCount = N;
+    this._m = new THREE.Matrix4(); this._q = new THREE.Quaternion(); this._e = new THREE.Euler(0, 0, 0, 'YXZ');
+    this._p = new THREE.Vector3(); this._s = new THREE.Vector3();
+    this.ready = true;
+    window._bfSwarm = this;
+  },
+  newLane: function (o, first) {
+    o.x = first ? (Math.random() * 2 - 1) * this.half : this.half;
+    o.speed = 28 / (10 + Math.random() * 4);
+    o.yOff = (Math.random() * 2 - 1) * 0.12; o.zOff = (Math.random() * 2 - 1) * 0.25;
+    o.bobF = 0.5 + Math.random() * 0.7; o.bobP = Math.random() * 6.283; o.wobP = Math.random() * 6.283;
+    o.size = 0.85 + Math.random() * 0.3;
+  },
+  setVisibleCount: function (n) { this.visibleCount = n; if (this.meshes) this.meshes.forEach((m) => { m.count = n; }); },
+  tick: function (time, dtMs) {
+    if (!this.ready) return;
+    const dt = Math.min(0.1, (dtMs || 16) / 1000);
+    this.t += dt; this.U.uTime.value = this.t;
+    const half = this.half, bob = window._bfBob != null ? window._bfBob : 0.09;
+    const wob = (window._bfWobble != null ? window._bfWobble : 7) * Math.PI / 180;
+    const size = window._bfSize != null ? window._bfSize : 1.15;     // +15% rispetto a prima
+    const from = window._colorFrom != null ? window._colorFrom : 5, to = window._colorTo != null ? window._colorTo : -5;
+    const m = this._m, q = this._q, e = this._e, p = this._p, s = this._s, ta = this.tint.array;
+    for (let i = 0; i < this.b.length; i++) {
+      const o = this.b[i];
+      o.x -= o.speed * dt;
+      if (o.x < -half) { o.x = half; this.newLane(o, false); }
+      p.set(o.x, o.slot.y + o.yOff + Math.sin(this.t * o.bobF * 2.4 + o.bobP) * bob, o.slot.z + o.zOff);
+      e.set(Math.sin(this.t * 1.7 + o.wobP) * wob * 0.6, -Math.PI / 2 + Math.sin(this.t * 0.8 + o.wobP) * wob, Math.sin(this.t * 1.3 + o.bobP) * wob * 0.7);
+      q.setFromEuler(e);
+      const k = Math.max(0.001, Math.min(1, (half - Math.abs(o.x)) / 1.2)) * o.size * size;
+      s.set(0.2 * k, 0.15 * k, 0.2 * k);
+      m.compose(p, q, s);
+      this.meshes[0].setMatrixAt(i, m);
+      let c = (from - o.x) / (from - to); c = Math.max(0, Math.min(1, c)); ta[i] = c * c * (3 - 2 * c);
+    }
+    this.meshes[0].instanceMatrix.needsUpdate = true;
+    this.tint.needsUpdate = true;
+  }
+});
+
+// Precarica e "cuoce" il modello appena la scena e' pronta: allo START lo sciame parte subito.
+if (!BF_LEGACY) {
+  const _sc = document.querySelector('a-scene');
+  if (_sc) { if (_sc.hasLoaded) bfLoadAssets(); else _sc.addEventListener('loaded', () => bfLoadAssets(), { once: true }); }
+}
+
 function createSwarm(swarmContainer) {
+  if (!BF_LEGACY) {
+    const n = window._swarmFullCount != null ? window._swarmFullCount : 90;
+    window._swarmFullCount = n;
+    swarmContainer.setAttribute('bf-swarm', { count: n });
+    return;
+  }
+  return createSwarmLegacy(swarmContainer);
+}
+
+function createSwarmLegacy(swarmContainer) {
   // Sciame a PIENO REGIME: 90 farfalle. Quando compare la mano ne nascondiamo 30 (si
   // scende a 60, vedi applySwarmReduction) e mettiamo in PAUSA il loro animation-mixer:
   // MediaPipe + 90 mesh animate + la Lottie del camioncino saturano il main thread e la

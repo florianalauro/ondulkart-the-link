@@ -86,6 +86,7 @@
       padding: 10px 18px; border-radius: 22px; box-shadow: 0 4px 16px rgba(0,0,0,0.35);
       opacity: 0; transition: opacity 0.25s; }
     #tooClose { top: 14%; font-size: 15px; }
+    #hint { bottom: max(28px, env(safe-area-inset-bottom)); top: auto; background: rgba(20,20,20,0.82); font-size: 15px; max-width: 86%; }
     #rude { top: 50%; transform: translate(-50%, -50%); font-size: 22px; font-weight: 700; padding: 18px 26px; max-width: 82%; }
 
     #hud { position: fixed; left: 8px; bottom: 8px; z-index: 5000; background: rgba(0,0,0,0.75); color: #0ff;
@@ -126,6 +127,7 @@
   <div id="handLottie"><lottie-player id="lottieAnim" src="truck.json" background="transparent" speed="1.4" style="width:180px;height:180px;" loop></lottie-player></div>
   <div id="tooClose" class="toast">✋ Allontana la mano dallo schermo</div>
   <div id="rude" class="toast">Sostenibilità non è maleducazione</div>
+  <div id="hint" class="toast"></div>
   <div id="hud" class="hidden"></div>
 
   <script>
@@ -199,6 +201,10 @@
       maxDpr: IS_IOS() ? 2 : 1.5,
 
       // Mano
+      pollen: !Q.has('nopollen'),   // pulviscolo di polline nell'aria (punto 7)
+      pollenCount: +(Q.get('pollen') || 500),
+      pollenAlpha: 0.75,
+      aids: true,                  // vibrazione all'aggancio + messaggi se il tracciamento si perde (punto 8)
       hands: !Q.has('nohands'),
       handFps: 12,
       handOffsetX: 0,
@@ -250,7 +256,7 @@
     lastDelta: 0, lastDYaw: 0,
   };
 
-  let scene, camera, renderer, tunnel, swarm = null, clock = new THREE.Clock();
+  let scene, camera, renderer, tunnel, swarm = null, pollen = null, clock = new THREE.Clock();
   let started = false, trackingStatus = '-', trackingReason = '';
   const tgtDiag = { json: '-', loading: 0, scanning: 0, found: 0, updated: 0, rejected: 0, lastReject: '' };
 
@@ -515,6 +521,113 @@
   }
 
   // ═════════════════════════════════════════════════════════════════════════
+  // 2b. PULVISCOLO DI POLLINE (punto 7)
+  // ═════════════════════════════════════════════════════════════════════════
+  // Particelle leggerissime sospese nell'aria attorno al visitatore: danno profondita' allo
+  // spazio e fanno "sentire" l'aria del tunnel. Una sola draw call. Il volume segue il
+  // visitatore lungo il nastro (le particelle si riavvolgono ai bordi), ma resta ancorato al
+  // mondo: camminando le particelle scorrono via come vere. ?nopollen per spegnerle.
+  function createPollen() {
+    const N = CFG.pollenCount, pos = new Float32Array(N * 3), seed = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      pos[i * 3] = (Math.random() * 2 - 1) * 6;           // x relativo al visitatore (riavvolto nello shader)
+      pos[i * 3 + 1] = 0.15 + Math.random() * 3.1;
+      pos[i * 3 + 2] = 2.5 - Math.random() * 9.0;          // da 2.5 m davanti al totem a 6.5 m dietro
+      seed[i] = Math.random();
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+    const mat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      uniforms: { uTime: { value: 0 }, uPx: { value: 800 }, uCx: { value: 0 }, uFade: { value: 0 }, uAlpha: { value: CFG.pollenAlpha } },
+      vertexShader: `
+        attribute float aSeed; uniform float uTime; uniform float uPx; uniform float uCx;
+        varying float vA;
+        void main() {
+          vec3 p = position;
+          float s = aSeed * 97.0;
+          // deriva lenta e irregolare (moti d'aria), leggera tendenza a salire
+          p.x += sin(uTime * 0.13 + s) * 0.35 + uTime * 0.04 * (aSeed - 0.5);
+          p.y += sin(uTime * 0.21 + s * 1.7) * 0.18 + uTime * 0.012;
+          p.z += cos(uTime * 0.17 + s * 2.3) * 0.25;
+          p.x = uCx + mod(p.x - uCx + 6.0, 12.0) - 6.0;      // volume di 12 m centrato sul visitatore
+          p.y = 0.15 + mod(p.y - 0.15, 3.1);
+          vec4 mv = modelViewMatrix * vec4(p, 1.0);
+          float dist = -mv.z;
+          gl_PointSize = clamp((0.009 + 0.012 * aSeed) * uPx / dist, 1.5, 22.0);
+          float tw = 0.5 + 0.5 * sin(uTime * (0.8 + aSeed * 1.6) + s);
+          // niente particelle giganti attaccate all'obiettivo, e sfumate in lontananza
+          vA = tw * smoothstep(0.25, 0.8, dist) * (1.0 - smoothstep(6.0, 9.0, dist));
+          vA *= smoothstep(0.0, 0.3, p.y - 0.15) * (1.0 - smoothstep(2.9, 3.25, p.y));
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: `
+        uniform float uFade; uniform float uAlpha; varying float vA;
+        void main() {
+          vec2 c = gl_PointCoord - 0.5; float d = dot(c, c);
+          float a = exp(-d * 11.0) * vA * uFade * uAlpha;
+          // blending additivo (SRC_ALPHA, ONE): il colore va passato NON premoltiplicato
+          gl_FragColor = vec4(1.0, 0.95, 0.82, a);              // bianco caldo, polline in controluce
+        }`,
+    });
+    const pts = new THREE.Points(geo, mat);
+    pts.frustumCulled = false; pts.renderOrder = 5;
+    tunnel.add(pts);
+    let t = 0;
+    return {
+      update(dt) {
+        t += dt;
+        const u = mat.uniforms;
+        u.uTime.value = t;
+        u.uCx.value = window._visitorX != null ? window._visitorX : 0;
+        u.uPx.value = (renderer ? renderer.domElement.height : 800) * 0.5 * (camera ? camera.projectionMatrix.elements[5] : 1.5);
+        u.uFade.value = Math.min(1, u.uFade.value + dt / 3);   // compare in 3 s dopo l'aggancio
+        u.uAlpha.value = CFG.pollenAlpha;
+      },
+    };
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // 2c. AIUTI ALL'USO (punto 8)
+  // ═════════════════════════════════════════════════════════════════════════
+  // - vibrazione breve quando il totem si aggancia (Android; iOS non supporta la vibrazione web)
+  // - messaggio se il tracciamento si degrada (movimento troppo rapido, poca luce)
+  // - dopo una perdita di tracciamento: invito a reinquadrare il totem per riallineare
+  const aids = { badSince: 0, wasLost: false, hintUntil: 0, hintText: '', relignUntil: 0 };
+  function buzz(pattern) { try { if (navigator.vibrate) navigator.vibrate(pattern); } catch (e) {} }
+  function showHint(text, ms) { aids.hintText = text; aids.hintUntil = performance.now() + ms; }
+  function updateAids() {
+    if (!CFG.aids || !anchor.ready) return;
+    const now = performance.now();
+    const ok = trackingStatus === 'NORMAL' || trackingStatus === 2;
+    if (!ok) {
+      if (!aids.badSince) aids.badSince = now;
+      if (now - aids.badSince > 1200) {
+        aids.wasLost = true;
+        const r = String(trackingReason || '').toUpperCase();
+        showHint(r.includes('LIGHT') ? 'Serve più luce: inquadra una zona illuminata'
+          : r.includes('MOTION') ? 'Muovi il telefono più lentamente'
+          : 'Muovi il telefono lentamente per ritrovare lo spazio', 600);
+      }
+    } else {
+      aids.badSince = 0;
+      if (aids.wasLost) {                     // tracciamento tornato: meglio riallinearsi al totem
+        aids.wasLost = false;
+        if (anchor.fromTarget) { aids.relignUntil = now + 7000; aids.relignFrom = anchor.lastSeen; }
+      }
+      if (aids.relignUntil > now) {
+        if (anchor.lastSeen > aids.relignFrom) aids.relignUntil = 0;   // totem rivisto: fatto
+        else showHint('Inquadra di nuovo il QR sul totem per riallineare le farfalle', 300);
+      }
+    }
+    const el = $('hint');
+    const show = now < aids.hintUntil;
+    if (show && el.textContent !== aids.hintText) el.textContent = aids.hintText;
+    el.style.opacity = show ? '1' : '0';
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
   // 3. SCENA
   // ═════════════════════════════════════════════════════════════════════════
   function setupScene(sc) {
@@ -700,6 +813,8 @@
     $('calib').classList.add('hidden');
     tunnel.visible = true;
     if (!swarm && window._assets) swarm = createSwarm(window._assets);
+    if (!pollen && CFG.pollen) pollen = createPollen();
+    if (anchor.fromTarget && !aids.buzzed) { aids.buzzed = true; buzz([25, 40, 25]); }
   }
 
   // ═════════════════════════════════════════════════════════════════════════
@@ -760,6 +875,8 @@
         onUpdate: ({ processCpuResult }) => {
           const dt = Math.min(clock.getDelta(), 0.1);
           if (swarm && tunnel.visible) swarm.update(dt);
+          if (pollen && tunnel.visible) pollen.update(dt);
+          updateAids();
           if (CFG.debug) updateHud();
         },
         // La mano legge il frame SUBITO dopo il render di three (stesso task, prima che il
@@ -928,6 +1045,7 @@
       const dt = Math.min(clock.getDelta(), 0.1);
       camera.rotation.set(-pitch, -yaw, 0, 'YXZ');
       swarm && swarm.update(dt);
+      pollen && pollen.update(dt);
       renderer.render(sc, camera);
       updateHud();
     })();
