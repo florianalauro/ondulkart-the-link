@@ -202,7 +202,8 @@
 
       // Mano
       pollen: !Q.has('nopollen'),   // pulviscolo di polline nell'aria (punto 7)
-      pollenCount: +(Q.get('pollen') || 650),
+      pollenCount: +(Q.get('pollen') || 1400),
+      pollenFlow: 0.6,             // m/s, deriva del pulviscolo verso sinistra (le farfalle vanno a 2-2.8)
       pollenAlpha: 0.85,
       aids: true,                  // vibrazione all'aggancio + messaggi se il tracciamento si perde (punto 8)
       hands: !Q.has('nohands'),
@@ -539,57 +540,56 @@
   // ═════════════════════════════════════════════════════════════════════════
   // 2b. PULVISCOLO DI POLLINE (punto 7)
   // ═════════════════════════════════════════════════════════════════════════
-  // Particelle leggerissime sospese nell'aria attorno al visitatore: danno profondita' allo
-  // spazio e fanno "sentire" l'aria del tunnel. Una sola draw call. Il volume segue il
-  // visitatore lungo il nastro (le particelle si riavvolgono ai bordi), ma resta ancorato al
-  // mondo: camminando le particelle scorrono via come vere. ?nopollen per spegnerle.
+  // SOLO dentro il tunnel, nella fascia in cui volano le farfalle, per tutta la sua lunghezza.
+  // Scorre da destra a sinistra come trascinato dal loro volo (piu' lento di loro), con piccoli
+  // vortici. Coordinate del tunnel: resta ancorato al nastro. Una draw call. ?nopollen per spegnerlo.
   function createPollen() {
-    const N = CFG.pollenCount, pos = new Float32Array(N * 3), seed = new Float32Array(N);
+    const N = CFG.pollenCount, half = CFG.tunnelLength / 2, pos = new Float32Array(N * 3), seed = new Float32Array(N);
     for (let i = 0; i < N; i++) {
-      pos[i * 3] = (Math.random() * 2 - 1) * 6;           // x relativo al visitatore (riavvolto nello shader)
-      pos[i * 3 + 1] = 0.15 + Math.random() * 3.1;
-      pos[i * 3 + 2] = 2.5 - Math.random() * 9.0;          // da 2.5 m davanti al totem a 6.5 m dietro
+      pos[i * 3] = (Math.random() * 2 - 1) * half; pos[i * 3 + 1] = Math.random(); pos[i * 3 + 2] = Math.random();
       seed[i] = Math.random();
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     geo.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
     const mat = new THREE.ShaderMaterial({
-      // blending normale (non additivo): sopra al video di una fabbrica illuminata un additivo
-      // bianco su fondo chiaro non si vede. Cosi' il granello resta visibile su qualsiasi sfondo.
       transparent: true, depthWrite: false, blending: THREE.NormalBlending,
-      uniforms: { uTime: { value: 0 }, uPx: { value: 800 }, uCx: { value: 0 }, uFade: { value: 0 }, uAlpha: { value: CFG.pollenAlpha } },
+      uniforms: {
+        uTime: { value: 0 }, uPx: { value: 800 }, uHalf: { value: half }, uMid: { value: CFG.tunnelMidX },
+        uY0: { value: CFG.yMin - 0.3 }, uY1: { value: CFG.yMax + 0.3 }, uZ0: { value: CFG.bandNear - 0.3 }, uZ1: { value: CFG.bandFar + 0.3 },
+        uFlow: { value: CFG.pollenFlow }, uFade: { value: 0 }, uAlpha: { value: CFG.pollenAlpha }
+      },
       vertexShader: `
-        attribute float aSeed; uniform float uTime; uniform float uPx; uniform float uCx;
+        attribute float aSeed;
+        uniform float uTime; uniform float uPx; uniform float uHalf; uniform float uMid;
+        uniform float uY0; uniform float uY1; uniform float uZ0; uniform float uZ1; uniform float uFlow;
         varying float vA;
         void main() {
-          vec3 p = position;
           float s = aSeed * 97.0;
-          // deriva lenta e irregolare (moti d'aria), leggera tendenza a salire
-          p.x += sin(uTime * 0.13 + s) * 0.35 + uTime * 0.04 * (aSeed - 0.5);
-          p.y += sin(uTime * 0.21 + s * 1.7) * 0.18 + uTime * 0.012;
-          p.z += cos(uTime * 0.17 + s * 2.3) * 0.25;
-          p.x = uCx + mod(p.x - uCx + 6.0, 12.0) - 6.0;      // volume di 12 m centrato sul visitatore
-          p.y = 0.15 + mod(p.y - 0.15, 3.1);
+          // trascinato dal flusso delle farfalle: scorre verso -X (destra -> sinistra), piu' lento di loro
+          float v = uFlow * (0.55 + 0.9 * aSeed);
+          float x = position.x - uTime * v + sin(uTime * 0.5 + s) * 0.3;
+          x = mod(x + uHalf, 2.0 * uHalf) - uHalf;
+          // piccoli vortici: l'aria rimescolata dal battito delle ali
+          float yN = fract(position.y + sin(uTime * 0.35 + s + x * 0.45) * 0.05 + uTime * 0.004 * (aSeed - 0.3));
+          float zN = clamp(position.z + sin(uTime * 0.28 + s * 1.3 + x * 0.3) * 0.04, 0.0, 1.0);
+          vec3 p = vec3(uMid + x, mix(uY0, uY1, yN), -mix(uZ0, uZ1, zN));
           vec4 mv = modelViewMatrix * vec4(p, 1.0);
           float dist = -mv.z;
-          gl_PointSize = clamp((0.012 + 0.018 * aSeed) * uPx / dist, 2.5, 30.0);
+          gl_PointSize = clamp((0.012 + 0.018 * aSeed) * uPx / max(dist, 0.01), 2.0, 26.0);
           float tw = 0.5 + 0.5 * sin(uTime * (0.8 + aSeed * 1.6) + s);
-          // niente particelle giganti attaccate all'obiettivo, e sfumate in lontananza
-          vA = tw * smoothstep(0.25, 0.8, dist) * (1.0 - smoothstep(6.0, 9.0, dist));
-          vA *= smoothstep(0.0, 0.3, p.y - 0.15) * (1.0 - smoothstep(2.9, 3.25, p.y));
+          vA = tw * smoothstep(0.3, 0.9, dist) * (1.0 - smoothstep(7.0, 10.0, dist));
+          vA *= 1.0 - smoothstep(uHalf - 1.5, uHalf, abs(x));                // sfuma alle estremita' del tunnel
+          vA *= smoothstep(0.0, 0.08, yN) * (1.0 - smoothstep(0.9, 1.0, yN)); // e ai bordi della fascia
           gl_Position = projectionMatrix * mv;
         }`,
       fragmentShader: `
         uniform float uFade; uniform float uAlpha; varying float vA;
         void main() {
-          vec2 c = gl_PointCoord - 0.5; float d = dot(c, c);
-          if (d > 0.25) discard;
+          vec2 c = gl_PointCoord - 0.5; float d = dot(c, c); if (d > 0.25) discard;
           float core = exp(-d * 14.0);
-          float a = core * vA * uFade * uAlpha;
-          // granello bianco caldo con un bordo appena piu' scuro: leggibile anche su fondo chiaro
           vec3 col = mix(vec3(0.55, 0.5, 0.42), vec3(1.0, 0.96, 0.86), smoothstep(0.0, 0.6, core));
-          gl_FragColor = vec4(col, a);
+          gl_FragColor = vec4(col, core * vA * uFade * uAlpha);
         }`,
     });
     const pts = new THREE.Points(geo, mat);
@@ -601,10 +601,9 @@
         t += dt;
         const u = mat.uniforms;
         u.uTime.value = t;
-        u.uCx.value = window._visitorX != null ? window._visitorX : 0;
         u.uPx.value = (renderer ? renderer.domElement.height : 800) * 0.5 * (camera ? camera.projectionMatrix.elements[5] : 1.5);
         u.uFade.value = Math.min(1, u.uFade.value + dt / 3);   // compare in 3 s dopo l'aggancio
-        u.uAlpha.value = CFG.pollenAlpha;
+        u.uAlpha.value = CFG.pollenAlpha; u.uFlow.value = CFG.pollenFlow;
       },
     };
   }
