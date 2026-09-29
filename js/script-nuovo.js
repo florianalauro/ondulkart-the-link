@@ -492,14 +492,33 @@ function onStep(now) {
 }
 
 // Avvia il loop di camminata (avanzamento continuo + tunnel infinito). All'attivazione.
+// ── SPOSTAMENTO LATERALE LUNGO IL TUNNEL ─────────────────────────────────────────────
+// Il tunnel e' FERMO nel mondo e centrato sul totem (x = 0 del sistema dello sciame): prima
+// lo sciame ti seguiva ("tunnel infinito"), quindi non potevi mai arrivare alle estremita'.
+// Ora la camera si muove SOLO lungo l'asse del nastro (x locale dello sciame):
+//  - a ogni passo avanzi della componente del tuo sguardo parallela al nastro: guardando
+//    verso destra cammini verso l'estremita' destra, verso sinistra verso quella sinistra,
+//    guardando dritto il nastro resti fermo (non puoi "entrare" nel nastro);
+//  - la posizione e' limitata alle estremita' reali del tunnel (+-14 m dal totem);
+//  - quando inquadri di nuovo il QR (quindi sei al totem) la posizione torna dolcemente a 0:
+//    l'errore accumulato contando i passi si azzera.
+// Parametri live: window._walkSpeedMax (m/s), window._tunnelHalf (14), window._walkLateral=false
+// per tornare al vecchio cammino libero.
+const _walkAxis = new THREE.Vector3();
+const _walkTmp = new THREE.Vector3();
+_walk.lx = 0;              // posizione della camera lungo il nastro (m, 0 = totem)
+
 function stepWalkInit() {
   const camEl = document.getElementById('main-camera');
   if (camEl && camEl.object3D) { _walk.tx = camEl.object3D.position.x; _walk.tz = camEl.object3D.position.z; }
+  _walk.lx = 0;
   if (_walk.started) return;
   _walk.started = true;
   _walk.lastLoop = performance.now();
   requestAnimationFrame(stepWalkLoop);
 }
+
+function tunnelHalf() { return window._tunnelHalf != null ? window._tunnelHalf : 14; }
 
 function stepWalkLoop() {
   const now = performance.now();
@@ -513,18 +532,39 @@ function stepWalkLoop() {
   const vMax = window._walkSpeedMax != null ? window._walkSpeedMax : 1.1;   // m/s
   _walk.speed += (_walkConfidence * vMax - _walk.speed) * 0.12;
 
-  // Avanza il TARGET di posizione nella direzione di sguardo, in continuo, a _walk.speed.
   const camEl = document.getElementById('main-camera');
   const cam = camEl && camEl.getObject3D && camEl.getObject3D('camera');
+  const swarm = document.getElementById('swarm');
+  const lateral = window._walkLateral !== false && swarm && swarm.object3D;
+
   if (cam && _walk.speed > 0.01) {
     const dir = new THREE.Vector3();
     cam.getWorldDirection(dir);
     dir.y = 0;
     if (dir.lengthSq() > 1e-6) {
       dir.normalize();
-      _walk.tx += dir.x * _walk.speed * dt;
-      _walk.tz += dir.z * _walk.speed * dt;
+      if (lateral) {
+        // asse del nastro nel mondo = +X locale dello sciame (ruotato dal QR)
+        const yaw = swarm.object3D.rotation.y;
+        _walkAxis.set(Math.cos(yaw), 0, -Math.sin(yaw));
+        _walk.lx += dir.dot(_walkAxis) * _walk.speed * dt;
+      } else {
+        _walk.tx += dir.x * _walk.speed * dt;
+        _walk.tz += dir.z * _walk.speed * dt;
+      }
     }
+  }
+
+  if (lateral) {
+    // limiti: le estremita' del tunnel (mezzo metro di margine)
+    const lim = tunnelHalf() - 0.5;
+    _walk.lx = Math.max(-lim, Math.min(lim, _walk.lx));
+    // target in coordinate mondo: punto sull'asse del nastro all'altezza del totem
+    swarm.object3D.updateMatrixWorld();
+    _walkTmp.set(_walk.lx, 0, 0);
+    swarm.object3D.localToWorld(_walkTmp);
+    _walk.tx = _walkTmp.x; _walk.tz = _walkTmp.z;
+    window._tunnelPos = { x: _walk.lx, toRight: tunnelHalf() - _walk.lx, toLeft: tunnelHalf() + _walk.lx };
   }
 
   // Glide della camera verso il target (fluido).
@@ -535,17 +575,27 @@ function stepWalkLoop() {
     p.z += (_walk.tz - p.z) * ease;
     recenterSwarm(p);
   }
+  if (lateral && window._stepDebug && window._tunnelPos) {
+    const t = window._tunnelPos;
+    setStepDbg(`tunnel: x ${t.x.toFixed(1)} m | a destra ${t.toRight.toFixed(1)} m | a sinistra ${t.toLeft.toFixed(1)} m\nv ${_walk.speed.toFixed(2)} m/s | conf ${_walkConfidence.toFixed(2)} | passi ${window._stepCount || 0}`);
+  }
   requestAnimationFrame(stepWalkLoop);
 }
 
-// #3 TUNNEL INFINITO: ricentra LENTAMENTE lo sciame attorno alla camera. Follow lento
-// (default 0.03) = mentre avanzi ottieni la parallasse (ci passi in mezzo) ma lo sciame
-// ti "riavvolge" piano, cosi' non esci mai dal nastro. window._swarmFollow: 0 = sciame
-// fermo nel mondo (puoi uscirne); 1 = incollato alla camera (nessuna parallasse).
+// Riallineamento della posizione al totem: chiamata quando il QR e' inquadrato da vicino.
+function recenterWalkOnTotem() {
+  if (window._walkLateral === false) return;
+  const k = window._qrPosEase != null ? window._qrPosEase : 0.25;
+  _walk.lx += (0 - _walk.lx) * k;
+}
+
+// Ricentraggio dello sciame sulla camera ("tunnel infinito"). DISATTIVATO di default: ora il
+// tunnel e' fermo e centrato sul totem, e ci si muove lungo di esso. window._swarmFollow > 0
+// per riattivarlo (0.03 era il vecchio valore).
 function recenterSwarm(camPos) {
   const swarm = document.getElementById('swarm');
   if (!swarm || !swarm.object3D) return;
-  const k = window._swarmFollow != null ? window._swarmFollow : 0.03;
+  const k = window._swarmFollow != null ? window._swarmFollow : 0;
   if (k <= 0) return;
   const s = swarm.object3D.position;
   s.x += (camPos.x - s.x) * k;
@@ -756,6 +806,10 @@ function onQrDetected(code) {
 
   if (!experienceActivated) triggerExperience(); // primo QR -> spawn
   applyBeltYaw(yaw);
+  // QR grande nell'inquadratura = sei al totem: azzera l'errore della posizione lungo il nastro
+  const qrW = Math.hypot(loc.topRightCorner.x - loc.topLeftCorner.x, loc.topRightCorner.y - loc.topLeftCorner.y);
+  const frameW = (_qrCanvas && _qrCanvas.width) || 480;
+  if (qrW > frameW * (window._qrNearFrac != null ? window._qrNearFrac : 0.12)) recenterWalkOnTotem();
 }
 
 function applyBeltYaw(yaw) {
