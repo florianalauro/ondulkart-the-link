@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+    <title>Farfalle AR</title>
+    <script src="https://aframe.io/releases/1.3.0/aframe.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/donmccurdy/aframe-extras@v6.1.1/dist/aframe-extras.min.js"></script>
+    <!-- Effetto mano Lottie (come in 8thwall) -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://unpkg.com/@lottiefiles/lottie-player@2.0.8/dist/lottie-player.js"></script>
+    <!-- jsQR: rileva il QR del totem per ancorare la direzione del tunnel e azzerare il drift -->
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+    <link rel="stylesheet" href="css/style.css?v=3">
+  </head>
+
+  <body>
+    <video id="webcam-video" autoplay playsinline muted></video>
+
+    <div id="overlay">
+      <div id="status-msg">
+        <div class="logo-area">
+          <a href="/">
+            <img src="assets/icons/Logo Ondulkart_w.svg" alt="Ondulkart" class="logo-img">
+          </a>
+        </div>
+        <div class="middle-content">
+          <h1 class="main-title">THE LINK</h1>
+          <p class="sub-title"><em>Where Technology meets the Soul of Nature</em></p>
+        </div>
+        <div class="button-area">
+          <button class="btn-start" onclick="startExperience()">START</button>
+        </div>
+      </div>
+
+      <div id="calibration-msg" class="hidden">
+        <div class="icon-frame"></div>
+        <h2>INQUADRA IL QR</h2>
+        <p>Punta il telefono verso il QR sul totem per allineare l'esperienza</p>
+      </div>
+    </div>
+
+    <a-scene
+      embedded
+      vr-mode-ui="enabled: false"
+      device-orientation-permission-ui="enabled: false"
+      renderer="colorManagement: true; alpha: true; antialias: false;maxCanvasWidth: -1; maxCanvasHeight: -1;"
+      background="transparent: true;">
+
+      <a-assets>
+        <a-asset-item id="butterflyModel" src="assets/models/animated_butterfly_fucsia.glb"></a-asset-item>
+      </a-assets>
+
+      <a-camera id="main-camera" look-controls="touchEnabled: false" wasd-controls-enabled="false" position="0 1.6 0"></a-camera>
+      <a-entity id="swarm"></a-entity>
+
+      <!-- Luci piu' basse di prima (ambient 1.2 + directional 1 + emissive 1 = ali "bruciate"):
+           cosi' il fucsia e l'arancione del brand restano riconoscibili e il battito d'ali
+           prende chiaroscuro. Emissive delle ali: window._bfEmissive (default 0.6). -->
+      <a-entity light="type: hemisphere; color: #ffffff; groundColor: #b8b8b8; intensity: 0.8;"></a-entity>
+      <a-entity light="type: directional; intensity: 0.9; position: 0.6 2 1.2"></a-entity>
+    </a-scene>
+
+    <!-- Overlay effetto mano Lottie (questa versione NON ha la maschera di occlusione) -->
+    <canvas id="handMaskCanvas"></canvas>
+    <div id="handLottie" style="position: fixed; pointer-events: none; z-index: 9999; display: none; transform: translate(-50%, -50%);">
+      <lottie-player id="lottieAnim" src="truck.json" background="transparent" speed="1.571" style="width: 160px; height: 160px;" loop autoplay></lottie-player>
+    </div>
+
+    <!-- Versione CLIENTE: nessun HUD di debug. Deve stare PRIMA del caricamento dello script. -->
+    <script>window._noHud = true; window._stepDebug = false;</script>
+    <script src="js/script-nuovo.js?v=10"></script>
+  </body>
+</html>
