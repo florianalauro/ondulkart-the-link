@@ -51,8 +51,9 @@ AFRAME.registerComponent('butterfly-mesh-fix', {
         // sempre lo stesso, mano o non mano.
         node.frustumCulled = false;
         if (node.material) {
-          bfShareTexture(node.material, 'map', renderer);
-          bfShareTexture(node.material, 'emissiveMap', renderer);
+          // modello v2: anche normal map e ruvidita' (1024 px) vanno condivise, altrimenti
+          // 90 copie x 3 texture da 1024 saturano la memoria GPU
+          ['map', 'emissiveMap', 'normalMap', 'roughnessMap', 'metalnessMap'].forEach((slot) => bfShareTexture(node.material, slot, renderer));
         }
       }
     });

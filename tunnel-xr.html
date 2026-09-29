@@ -169,6 +169,7 @@
       tunnelMidX: 0,
       colorBlend: 1.2,         // m prima/dopo la meta' in cui il colore sfuma (fucsia -> arancione)
       emissive: 0.6,           // autoilluminazione ali (come butterfly-experience)
+      envIntensity: +(Q.get('env') || 0.5),   // riflessi dell'ambiente (0 = nessuno)
 
       // Pannello / image target
       // Target = TUTTO il piano superiore del totem (28 x 28 cm: "Enjoy The Butterfly Experience" + QR),
@@ -223,10 +224,14 @@
   <script type="module">
   import * as THREE from 'three';
   import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+  import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
   window.THREE = THREE; // XR8.Threejs usa window.THREE
 
   const CFG = window.CFG;
-  const MODEL_PATH = 'assets/models/animated_butterfly_fucsia.glb';
+  // v2 (rifatto in Blender): ali con curvatura e piu' geometria, punte che flettono in ritardo,
+  // corpo che sobbalza col battito, texture 1024 + normal map (venature/squame) + ruvidita'.
+  // ?model=v1 per confrontare col modello originale.
+  const MODEL_PATH = Q.get('model') === 'v1' ? 'assets/models/animated_butterfly_fucsia.glb' : 'assets/models/animated_butterfly_v2.glb';
   const $ = (id) => document.getElementById(id);
 
   // ═════════════════════════════════════════════════════════════════════════
@@ -425,6 +430,7 @@
       const mat = a.material.clone();
       mat.side = THREE.DoubleSide;
       if (key === 'wings') mat.emissiveIntensity = CFG.emissive;
+      mat.envMapIntensity = CFG.envIntensity;
       patchMaterial(mat, a.vat, key === 'wings', uniforms);
       a.geo.setAttribute('aPhase', phase);
       a.geo.setAttribute('aRate', rate);
@@ -519,6 +525,12 @@
     // Stesse luci di butterfly-experience (hemisphere 0.8 + directional 0.9, emissive 0.6).
     // three r158 usa luci "fisiche": x PI per avere la stessa resa della scala legacy di A-Frame.
     scene.add(new THREE.HemisphereLight(0xffffff, 0xb8b8b8, 0.8 * Math.PI));
+    // Riflessi morbidi (ambiente neutro): danno volume a ali curve e normal map.
+    if (renderer && !Q.has('noenv')) {
+      const pm = new THREE.PMREMGenerator(renderer);
+      scene.environment = pm.fromScene(new RoomEnvironment(), 0.04).texture;
+      pm.dispose();
+    }
     const d = new THREE.DirectionalLight(0xffffff, 0.9 * Math.PI); d.position.set(0.6, 2, 1.2); scene.add(d);
     if (CFG.debug || CFG.preview) addDebugHelpers();
   }
